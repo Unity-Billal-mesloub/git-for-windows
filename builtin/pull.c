@@ -454,7 +454,7 @@ static int run_fetch(const char *repo, const char **refspecs)
 	} else if (*refspecs)
 		BUG("refspecs without repo?");
 	cmd.git_cmd = 1;
-	cmd.close_object_store = 1;
+	cmd.odb_to_close = the_repository->objects;
 	return run_command(&cmd);
 }
 
@@ -996,8 +996,12 @@ int cmd_pull(int argc,
 		OPT_PASSTHRU('6',  "ipv6", &opt_ipv6, NULL,
 			N_("use IPv6 addresses only"),
 			PARSE_OPT_NOARG),
-		OPT_PASSTHRU_ARGV(0, "negotiation-tip", &opt_fetch, N_("revision"),
+		OPT_PASSTHRU_ARGV(0, "negotiation-restrict", &opt_fetch, N_("revision"),
 			N_("report that we have only objects reachable from this object"),
+			0),
+		OPT_ALIAS(0, "negotiation-tip", "negotiation-restrict"),
+		OPT_PASSTHRU_ARGV(0, "negotiation-include", &opt_fetch, N_("revision"),
+			N_("ensure this ref is always sent as a negotiation have"),
 			0),
 		OPT_BOOL(0, "show-forced-updates", &opt_show_forced_updates,
 			 N_("check for forced-updates on all updated branches")),

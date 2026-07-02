@@ -179,7 +179,7 @@ int read_mmfile(mmfile_t *ptr, const char *filename)
 void read_mmblob(mmfile_t *ptr, struct object_database *odb,
 		 const struct object_id *oid)
 {
-	unsigned long size;
+	size_t size;
 	enum object_type type;
 
 	if (is_null_oid(oid)) {
@@ -323,6 +323,18 @@ int parse_conflict_style_name(const char *value)
 	 */
 	else
 		return -1;
+}
+
+const char *conflict_style_name(int style)
+{
+	switch (style) {
+	case XDL_MERGE_DIFF3:
+		return "diff3";
+	case XDL_MERGE_ZEALOUS_DIFF3:
+		return "zdiff3";
+	default:
+		return "merge";
+	}
 }
 
 int git_xmerge_style = -1;

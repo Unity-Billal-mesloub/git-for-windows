@@ -473,7 +473,7 @@ static int get_push_ref_states(const struct ref *remote_refs,
 		else if (is_null_oid(&ref->old_oid))
 			info->status = PUSH_STATUS_CREATE;
 		else if (odb_has_object(the_repository->objects, &ref->old_oid,
-					HAS_OBJECT_RECHECK_PACKED | HAS_OBJECT_FETCH_PROMISOR) &&
+					ODB_HAS_OBJECT_RECHECK_PACKED | ODB_HAS_OBJECT_FETCH_PROMISOR) &&
 			 ref_newer(&ref->new_oid, &ref->old_oid))
 			info->status = PUSH_STATUS_FASTFORWARD;
 		else
@@ -912,6 +912,9 @@ static int mv(int argc, const char **argv, const char *prefix,
 						old_remote_context.buf);
 
 	if (refspecs_need_update) {
+		struct refs_for_each_ref_options opts = {
+			.flags = REFS_FOR_EACH_INCLUDE_BROKEN,
+		};
 		rename.transaction = ref_store_transaction_begin(get_main_ref_store(the_repository),
 							       0, &err);
 		if (!rename.transaction)
@@ -923,9 +926,10 @@ static int mv(int argc, const char **argv, const char *prefix,
 
 		strbuf_reset(&buf);
 		strbuf_addf(&buf, "refs/remotes/%s/", rename.old_name);
+		opts.prefix = buf.buf;
 
-		result = refs_for_each_rawref_in(get_main_ref_store(the_repository), buf.buf,
-				rename_one_ref, &rename);
+		result = refs_for_each_ref_ext(get_main_ref_store(the_repository),
+					       rename_one_ref, &rename, &opts);
 		if (result < 0)
 			die(_("queueing remote ref renames failed: %s"), rename.err->buf);
 

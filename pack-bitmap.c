@@ -441,11 +441,11 @@ char *midx_bitmap_filename(struct multi_pack_index *midx)
 	struct strbuf buf = STRBUF_INIT;
 	if (midx->has_chain)
 		get_split_midx_filename_ext(midx->source, &buf,
-					    get_midx_checksum(midx),
+					    midx_get_checksum_hash(midx),
 					    MIDX_EXT_BITMAP);
 	else
 		get_midx_filename_ext(midx->source, &buf,
-				      get_midx_checksum(midx),
+				      midx_get_checksum_hash(midx),
 				      MIDX_EXT_BITMAP);
 
 	return strbuf_detach(&buf, NULL);
@@ -502,7 +502,7 @@ static int open_midx_bitmap_1(struct bitmap_index *bitmap_git,
 	if (load_bitmap_header(bitmap_git) < 0)
 		goto cleanup;
 
-	if (!hasheq(get_midx_checksum(bitmap_git->midx), bitmap_git->checksum,
+	if (!hasheq(midx_get_checksum_hash(bitmap_git->midx), bitmap_git->checksum,
 		    bitmap_repo(bitmap_git)->hash_algo)) {
 		error(_("checksum doesn't match in MIDX and bitmap"));
 		goto cleanup;
@@ -1856,7 +1856,7 @@ static void filter_bitmap_blob_none(struct bitmap_index *bitmap_git,
 static unsigned long get_size_by_pos(struct bitmap_index *bitmap_git,
 				     uint32_t pos)
 {
-	unsigned long size;
+	size_t size;
 	struct object_info oi = OBJECT_INFO_INIT;
 
 	oi.sizep = &size;
@@ -1891,7 +1891,7 @@ static unsigned long get_size_by_pos(struct bitmap_index *bitmap_git,
 			die(_("unable to get size of %s"), oid_to_hex(&obj->oid));
 	}
 
-	return size;
+	return cast_size_t_to_ulong(size);
 }
 
 static void filter_bitmap_blob_limit(struct bitmap_index *bitmap_git,
@@ -2270,7 +2270,7 @@ static int try_partial_reuse(struct bitmap_index *bitmap_git,
 {
 	off_t delta_obj_offset;
 	enum object_type type;
-	unsigned long size;
+	size_t size;
 
 	if (pack_pos >= pack->p->num_objects)
 		return -1; /* not actually in the pack */
@@ -2819,8 +2819,7 @@ void test_bitmap_walk(struct rev_info *revs)
 
 		if (bitmap_is_midx(found))
 			fprintf_ln(stderr, "Located via MIDX '%s'.",
-				   hash_to_hex_algop(get_midx_checksum(found->midx),
-						     revs->repo->hash_algo));
+				   midx_get_checksum_hex(found->midx));
 		else
 			fprintf_ln(stderr, "Located via pack '%s'.",
 				   hash_to_hex_algop(found->pack->hash,
@@ -3324,8 +3323,9 @@ static const struct string_list *bitmap_preferred_tips(struct repository *r)
 }
 
 void for_each_preferred_bitmap_tip(struct repository *repo,
-				   each_ref_fn cb, void *cb_data)
+				   refs_for_each_cb cb, void *cb_data)
 {
+	struct refs_for_each_ref_options opts = { 0 };
 	struct string_list_item *item;
 	const struct string_list *preferred_tips;
 	struct strbuf buf = STRBUF_INIT;
@@ -3335,16 +3335,16 @@ void for_each_preferred_bitmap_tip(struct repository *repo,
 		return;
 
 	for_each_string_list_item(item, preferred_tips) {
-		const char *pattern = item->string;
+		opts.prefix = item->string;
 
-		if (!ends_with(pattern, "/")) {
+		if (!ends_with(opts.prefix, "/")) {
 			strbuf_reset(&buf);
-			strbuf_addf(&buf, "%s/", pattern);
-			pattern = buf.buf;
+			strbuf_addf(&buf, "%s/", opts.prefix);
+			opts.prefix = buf.buf;
 		}
 
-		refs_for_each_ref_in(get_main_ref_store(repo),
-				     pattern, cb, cb_data);
+		refs_for_each_ref_ext(get_main_ref_store(repo),
+				      cb, cb_data, &opts);
 	}
 
 	strbuf_release(&buf);

@@ -13,6 +13,7 @@
 #include "symlinks.h"
 #include "trace2.h"
 #include "win32.h"
+#include "win32/exit-process.h"
 #include "win32/lazyload.h"
 #include "wrapper.h"
 #include <aclapi.h>
@@ -449,20 +450,63 @@ static wchar_t *normalize_ntpath(wchar_t *wbuf)
 	return wbuf;
 }
 
+/*
+ * Use SetFileInformationByHandle(FileDispositionInfo) to force legacy
+ * (non-POSIX) delete semantics. On Windows 11, DeleteFileW() uses POSIX
+ * delete semantics internally, allowing deletion even with active
+ * MapViewOfFile views. This helper simulates Windows 10 behavior where
+ * deletion fails if a file mapping exists.
+ *
+ * Returns nonzero on success (like DeleteFileW), 0 on failure.
+ */
+static int legacy_delete_file(const wchar_t *wpathname)
+{
+	FILE_DISPOSITION_INFO fdi = { TRUE };
+	DWORD gle;
+	HANDLE h = CreateFileW(wpathname, DELETE,
+			       FILE_SHARE_READ | FILE_SHARE_WRITE |
+			       FILE_SHARE_DELETE,
+			       NULL, OPEN_EXISTING,
+			       FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+	if (h == INVALID_HANDLE_VALUE)
+		return 0;
+
+	if (SetFileInformationByHandle(h, FileDispositionInfo,
+				       &fdi, sizeof(fdi))) {
+		CloseHandle(h);
+		return 1;
+	}
+	gle = GetLastError();
+	CloseHandle(h);
+	SetLastError(gle);
+	return 0;
+}
+
+static int try_delete_file(const wchar_t *wpathname, int use_legacy)
+{
+	if (use_legacy)
+		return legacy_delete_file(wpathname);
+	return DeleteFileW(wpathname);
+}
+
 int mingw_unlink(const char *pathname, int handle_in_use_error)
 {
+	static int use_legacy_delete = -1;
 	int tries = 0;
 	wchar_t wpathname[MAX_PATH];
 	if (xutftowcs_path(wpathname, pathname) < 0)
 		return -1;
 
-	if (DeleteFileW(wpathname))
+	if (use_legacy_delete < 0)
+		use_legacy_delete = git_env_bool("GIT_TEST_LEGACY_DELETE", 0);
+
+	if (try_delete_file(wpathname, use_legacy_delete))
 		return 0;
 
 	do {
 		/* read-only files cannot be removed */
 		_wchmod(wpathname, 0666);
-		if (!_wunlink(wpathname))
+		if (try_delete_file(wpathname, use_legacy_delete))
 			return 0;
 		if (!is_file_in_use_error(GetLastError()))
 			break;
@@ -1394,6 +1438,9 @@ revert_attrs:
 size_t mingw_strftime(char *s, size_t max,
 		      const char *format, const struct tm *tm)
 {
+#ifdef _UCRT
+	size_t ret = strftime(s, max, format, tm);
+#else
 	/* a pointer to the original strftime in case we can't find the UCRT version */
 	static size_t (*fallback)(char *, size_t, const char *, const struct tm *) = strftime;
 	size_t ret;
@@ -1404,6 +1451,7 @@ size_t mingw_strftime(char *s, size_t max,
 		ret = strftime(s, max, format, tm);
 	else
 		ret = fallback(s, max, format, tm);
+#endif
 
 	if (!ret && errno == EINVAL)
 		die("invalid strftime format: '%s'", format);
@@ -2204,16 +2252,28 @@ int mingw_execvp(const char *cmd, char *const *argv)
 int mingw_kill(pid_t pid, int sig)
 {
 	if (pid > 0 && sig == SIGTERM) {
-		HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+		HANDLE h = OpenProcess(PROCESS_CREATE_THREAD |
+				       PROCESS_QUERY_INFORMATION |
+				       PROCESS_VM_OPERATION | PROCESS_VM_WRITE |
+				       PROCESS_VM_READ | PROCESS_TERMINATE,
+				       FALSE, pid);
+		int ret;
 
-		if (TerminateProcess(h, -1)) {
-			CloseHandle(h);
-			return 0;
+		if (h)
+			ret = exit_process(h, 128 + sig);
+		else {
+			h = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+			if (!h) {
+				errno = err_win_to_posix(GetLastError());
+				return -1;
+			}
+			ret = terminate_process_tree(h, 128 + sig);
 		}
-
-		errno = err_win_to_posix(GetLastError());
-		CloseHandle(h);
-		return -1;
+		if (ret) {
+			errno = err_win_to_posix(GetLastError());
+			CloseHandle(h);
+		}
+		return ret;
 	} else if (pid > 0 && sig == 0) {
 		HANDLE h = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
 		if (h) {
@@ -2460,7 +2520,7 @@ repeat:
 	if (supports_file_rename_info_ex) {
 		/*
 		 * Our minimum required Windows version is still set to Windows
-		 * Vista. We thus have to declare required infrastructure for
+		 * 8.1. We thus have to declare required infrastructure for
 		 * FileRenameInfoEx ourselves until we bump _WIN32_WINNT to
 		 * 0x0A00. Furthermore, we have to handle cases where the
 		 * FileRenameInfoEx call isn't supported yet.
@@ -3563,7 +3623,14 @@ static void adjust_symlink_flags(void)
 		symlink_file_flags |= 2;
 		symlink_directory_flags |= 2;
 	}
+}
 
+static BOOL WINAPI handle_ctrl_c(DWORD ctrl_type)
+{
+	if (ctrl_type != CTRL_C_EVENT)
+		return FALSE; /* we did not handle this */
+	mingw_raise(SIGINT);
+	return TRUE; /* we did handle this */
 }
 
 #ifdef _MSC_VER
@@ -3599,6 +3666,8 @@ int wmain(int argc, const wchar_t **wargv)
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 #endif
 #endif
+
+	SetConsoleCtrlHandler(handle_ctrl_c, TRUE);
 
 	maybe_redirect_std_handles();
 	adjust_symlink_flags();

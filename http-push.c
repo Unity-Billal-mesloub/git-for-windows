@@ -99,7 +99,7 @@ static struct object_list *objects;
 
 struct repo {
 	char *url;
-	char *path;
+	const char *path;
 	int path_len;
 	int has_info_refs;
 	int can_update_info_refs;
@@ -365,17 +365,18 @@ static void start_put(struct transfer_request *request)
 	enum object_type type;
 	char hdr[50];
 	void *unpacked;
-	unsigned long len;
+	size_t len;
 	int hdrlen;
 	ssize_t size;
 	git_zstream stream;
+	struct repo_config_values *cfg = repo_config_values(the_repository);
 
 	unpacked = odb_read_object(the_repository->objects, &request->obj->oid,
 				   &type, &len);
 	hdrlen = format_object_header(hdr, sizeof(hdr), type, len);
 
 	/* Set it up */
-	git_deflate_init(&stream, zlib_compression_level);
+	git_deflate_init(&stream, cfg->zlib_compression_level);
 	size = git_deflate_bound(&stream, len + hdrlen);
 	strbuf_grow(&request->buffer.buf, size);
 	request->buffer.posn = 0;
@@ -1449,7 +1450,7 @@ static void one_remote_ref(const char *refname)
 	 */
 	if (repo->can_update_info_refs &&
 	    !odb_has_object(the_repository->objects, &ref->old_oid,
-			    HAS_OBJECT_RECHECK_PACKED | HAS_OBJECT_FETCH_PROMISOR)) {
+			    ODB_HAS_OBJECT_RECHECK_PACKED | ODB_HAS_OBJECT_FETCH_PROMISOR)) {
 		obj = lookup_unknown_object(the_repository, &ref->old_oid);
 		fprintf(stderr,	"  fetch %s for %s\n",
 			oid_to_hex(&ref->old_oid), refname);
@@ -1655,7 +1656,7 @@ static int delete_remote_branch(const char *pattern, int force)
 		if (is_null_oid(&head_oid))
 			return error("Unable to resolve remote HEAD");
 		if (!odb_has_object(the_repository->objects, &head_oid,
-				    HAS_OBJECT_RECHECK_PACKED | HAS_OBJECT_FETCH_PROMISOR))
+				    ODB_HAS_OBJECT_RECHECK_PACKED | ODB_HAS_OBJECT_FETCH_PROMISOR))
 			return error("Remote HEAD resolves to object %s\nwhich does not exist locally, perhaps you need to fetch?", oid_to_hex(&head_oid));
 
 		/* Remote branch must resolve to a known object */
@@ -1663,7 +1664,7 @@ static int delete_remote_branch(const char *pattern, int force)
 			return error("Unable to resolve remote branch %s",
 				     remote_ref->name);
 		if (!odb_has_object(the_repository->objects, &remote_ref->old_oid,
-				    HAS_OBJECT_RECHECK_PACKED | HAS_OBJECT_FETCH_PROMISOR))
+				    ODB_HAS_OBJECT_RECHECK_PACKED | ODB_HAS_OBJECT_FETCH_PROMISOR))
 			return error("Remote branch %s resolves to object %s\nwhich does not exist locally, perhaps you need to fetch?", remote_ref->name, oid_to_hex(&remote_ref->old_oid));
 
 		/* Remote branch must be an ancestor of remote HEAD */
@@ -1788,7 +1789,7 @@ int cmd_main(int argc, const char **argv)
 	if (delete_branch && rs.nr != 1)
 		die("You must specify only one branch name when deleting a remote branch");
 
-	gitdir = setup_git_directory();
+	gitdir = setup_git_directory(the_repository);
 
 	memset(remote_dir_exists, -1, 256);
 
@@ -1886,7 +1887,7 @@ int cmd_main(int argc, const char **argv)
 		    !is_null_oid(&ref->old_oid) &&
 		    !ref->force) {
 			if (!odb_has_object(the_repository->objects, &ref->old_oid,
-					    HAS_OBJECT_RECHECK_PACKED | HAS_OBJECT_FETCH_PROMISOR) ||
+					    ODB_HAS_OBJECT_RECHECK_PACKED | ODB_HAS_OBJECT_FETCH_PROMISOR) ||
 			    !ref_newer(&ref->peer_ref->new_oid,
 				       &ref->old_oid)) {
 				/*

@@ -466,38 +466,20 @@ out:
 
 static int too_many_loose_objects(int limit)
 {
+	struct odb_source_files *files = odb_source_files_downcast(the_repository->objects->sources);
 	/*
-	 * Quickly check if a "gc" is needed, by estimating how
-	 * many loose objects there are.  Because SHA-1 is evenly
-	 * distributed, we can check only one and get a reasonable
-	 * estimate.
+	 * This is weird, but stems from legacy behaviour: the GC auto
+	 * threshold was always essentially interpreted as if it was rounded up
+	 * to the next multiple 256 of, so we retain this behaviour for now.
 	 */
-	DIR *dir;
-	struct dirent *ent;
-	int auto_threshold;
-	int num_loose = 0;
-	int needed = 0;
-	const unsigned hexsz_loose = the_hash_algo->hexsz - 2;
-	char *path;
+	int auto_threshold = DIV_ROUND_UP(limit, 256) * 256;
+	unsigned long loose_count;
 
-	path = repo_git_path(the_repository, "objects/17");
-	dir = opendir(path);
-	free(path);
-	if (!dir)
+	if (odb_source_count_objects(&files->loose->base, ODB_COUNT_OBJECTS_APPROXIMATE,
+				     &loose_count) < 0)
 		return 0;
 
-	auto_threshold = DIV_ROUND_UP(limit, 256);
-	while ((ent = readdir(dir)) != NULL) {
-		if (strspn(ent->d_name, "0123456789abcdef") != hexsz_loose ||
-		    ent->d_name[hexsz_loose] != '\0')
-			continue;
-		if (++num_loose > auto_threshold) {
-			needed = 1;
-			break;
-		}
-	}
-	closedir(dir);
-	return needed;
+	return loose_count > auto_threshold;
 }
 
 static struct packed_git *find_base_packs(struct string_list *packs,
@@ -592,8 +574,12 @@ static uint64_t total_ram(void)
 static uint64_t estimate_repack_memory(struct gc_config *cfg,
 				       struct packed_git *pack)
 {
-	unsigned long nr_objects = repo_approximate_object_count(the_repository);
+	unsigned long nr_objects;
 	size_t os_cache, heap;
+
+	if (odb_count_objects(the_repository->objects,
+			      ODB_COUNT_OBJECTS_APPROXIMATE, &nr_objects) < 0)
+		return 0;
 
 	if (!pack || !nr_objects)
 		return 0;
@@ -1030,7 +1016,7 @@ int cmd_gc(int argc,
 		struct child_process repack_cmd = CHILD_PROCESS_INIT;
 
 		repack_cmd.git_cmd = 1;
-		repack_cmd.close_object_store = 1;
+		repack_cmd.odb_to_close = the_repository->objects;
 		strvec_pushv(&repack_cmd.args, repack_args.v);
 		if (run_command(&repack_cmd))
 			die(FAILED_RUN, repack_args.v[0]);
@@ -1199,7 +1185,8 @@ static int run_write_commit_graph(struct maintenance_run_opts *opts)
 {
 	struct child_process child = CHILD_PROCESS_INIT;
 
-	child.git_cmd = child.close_object_store = 1;
+	child.git_cmd = 1;
+	child.odb_to_close = the_repository->objects;
 	strvec_pushl(&child.args, "commit-graph", "write",
 		     "--split", "--reachable", NULL);
 
@@ -1268,7 +1255,8 @@ static int maintenance_task_gc_background(struct maintenance_run_opts *opts,
 {
 	struct child_process child = CHILD_PROCESS_INIT;
 
-	child.git_cmd = child.close_object_store = 1;
+	child.git_cmd = 1;
+	child.odb_to_close = the_repository->objects;
 	strvec_push(&child.args, "gc");
 
 	if (opts->auto_flag)
@@ -1484,7 +1472,8 @@ static int multi_pack_index_expire(struct maintenance_run_opts *opts)
 {
 	struct child_process child = CHILD_PROCESS_INIT;
 
-	child.git_cmd = child.close_object_store = 1;
+	child.git_cmd = 1;
+	child.odb_to_close = the_repository->objects;
 	strvec_pushl(&child.args, "multi-pack-index", "expire", NULL);
 
 	if (opts->quiet)
@@ -1542,7 +1531,8 @@ static int multi_pack_index_repack(struct maintenance_run_opts *opts)
 {
 	struct child_process child = CHILD_PROCESS_INIT;
 
-	child.git_cmd = child.close_object_store = 1;
+	child.git_cmd = 1;
+	child.odb_to_close = the_repository->objects;
 	strvec_pushl(&child.args, "multi-pack-index", "repack", NULL);
 
 	if (opts->quiet)
@@ -1600,6 +1590,7 @@ static int maintenance_task_geometric_repack(struct maintenance_run_opts *opts,
 	pack_geometry_split(&geometry);
 
 	child.git_cmd = 1;
+	child.odb_to_close = the_repository->objects;
 
 	strvec_pushl(&child.args, "repack", "-d", "-l", NULL);
 	if (geometry.split < geometry.pack_nr)

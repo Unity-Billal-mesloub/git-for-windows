@@ -74,29 +74,31 @@ test_expect_success '--onto with invalid commit-ish' '
 	test_cmp expect actual
 '
 
-test_expect_success 'option --onto or --advance is mandatory' '
-	echo "error: option --onto or --advance is mandatory" >expect &&
+test_expect_success 'exactly one of --onto, --advance, or --revert is required' '
+	echo "error: exactly one of --onto, --advance, or --revert is required" >expect &&
 	test_might_fail git replay -h >>expect &&
 	test_must_fail git replay topic1..topic2 2>actual &&
 	test_cmp expect actual
 '
 
-test_expect_success 'no base or negative ref gives no-replaying down to root error' '
-	echo "fatal: replaying down from root commit is not supported yet!" >expect &&
-	test_must_fail git replay --onto=topic1 topic2 2>actual &&
+test_expect_success 'replay down to root onto another branch' '
+	git replay --ref-action=print --onto main topic2 >result &&
+
+	test_line_count = 1 result &&
+
+	git log --format=%s $(cut -f 3 -d " " result) >actual &&
+	test_write_lines E D C M L B A >expect &&
 	test_cmp expect actual
 '
 
-test_expect_success 'options --advance and --contained cannot be used together' '
-	printf "fatal: options ${SQ}--advance${SQ} " >expect &&
-	printf "and ${SQ}--contained${SQ} cannot be used together\n" >>expect &&
+test_expect_success '--advance and --contained cannot be used together' '
 	test_must_fail git replay --advance=main --contained \
 		topic1..topic2 2>actual &&
-	test_cmp expect actual
+	test_grep "cannot be used together" actual
 '
 
 test_expect_success 'cannot advance target ... ordering would be ill-defined' '
-	echo "fatal: cannot advance target with multiple sources because ordering would be ill-defined" >expect &&
+	echo "fatal: ${SQ}--advance${SQ} cannot be used with multiple revision ranges because the ordering would be ill-defined" >expect &&
 	test_must_fail git replay --advance=main main topic1 topic2 2>actual &&
 	test_cmp expect actual
 '
@@ -396,6 +398,171 @@ test_expect_success 'invalid replay.refAction value' '
 	test_config replay.refAction invalid &&
 	test_must_fail git replay --onto main topic1..topic2 2>error &&
 	test_grep "invalid.*replay.refAction.*value" error
+'
+
+test_expect_success 'argument to --revert must be a reference' '
+	echo "fatal: argument to --revert must be a reference" >expect &&
+	oid=$(git rev-parse main) &&
+	test_must_fail git replay --revert=$oid topic1..topic2 2>actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'cannot revert with multiple sources' '
+	echo "fatal: ${SQ}--revert${SQ} cannot be used with multiple revision ranges because the ordering would be ill-defined" >expect &&
+	test_must_fail git replay --revert main main topic1 topic2 2>actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'using replay --revert to revert commits' '
+	# Reuse existing topic4 branch (has commits I and J on top of main)
+	START=$(git rev-parse topic4) &&
+	test_when_finished "git branch -f topic4 $START" &&
+
+	# Revert commits I and J
+	git replay --revert topic4 topic4~2..topic4 &&
+
+	# Verify the revert commits were created (newest-first ordering
+	# means J is reverted first, then I on top)
+	git log --format=%s -4 topic4 >actual &&
+	cat >expect <<-\EOF &&
+	Revert "I"
+	Revert "J"
+	J
+	I
+	EOF
+	test_cmp expect actual &&
+
+	# Verify commit message format includes hash (tip is Revert "I")
+	test_commit_message topic4 <<-EOF &&
+	Revert "I"
+
+	This reverts commit $(git rev-parse I).
+	EOF
+
+	# Verify reflog message
+	git reflog topic4 -1 --format=%gs >reflog-msg &&
+	echo "replay --revert topic4" >expect-reflog &&
+	test_cmp expect-reflog reflog-msg
+'
+
+test_expect_success 'using replay --revert in bare repo' '
+	# Reuse existing topic4 in bare repo
+	START=$(git -C bare rev-parse topic4) &&
+	test_when_finished "git -C bare update-ref refs/heads/topic4 $START" &&
+
+	# Revert commit J in bare repo
+	git -C bare replay --revert topic4 topic4~1..topic4 &&
+
+	# Verify revert was created
+	git -C bare log -1 --format=%s topic4 >actual &&
+	echo "Revert \"J\"" >expect &&
+	test_cmp expect actual
+'
+
+test_expect_success 'revert of revert uses Reapply' '
+	# Use topic4 and first revert J, then revert the revert
+	START=$(git rev-parse topic4) &&
+	test_when_finished "git branch -f topic4 $START" &&
+
+	# First revert J
+	git replay --revert topic4 topic4~1..topic4 &&
+	REVERT_J=$(git rev-parse topic4) &&
+
+	# Now revert the revert - should become Reapply
+	git replay --revert topic4 topic4~1..topic4 &&
+
+	# Verify Reapply prefix and message format
+	test_commit_message topic4 <<-EOF
+	Reapply "J"
+
+	This reverts commit $REVERT_J.
+	EOF
+'
+
+test_expect_success 'git replay --revert with conflict' '
+	# conflict branch has C.conflict which conflicts with topic1s C
+	test_expect_code 1 git replay --revert conflict B..topic1
+'
+
+test_expect_success 'git replay --revert incompatible with --contained' '
+	test_must_fail git replay --revert topic4 --contained topic4~1..topic4 2>error &&
+	test_grep "cannot be used together" error
+'
+
+test_expect_success 'git replay --revert incompatible with --onto' '
+	test_must_fail git replay --revert topic4 --onto main topic4~1..topic4 2>error &&
+	test_grep "cannot be used together" error
+'
+
+test_expect_success 'git replay --revert incompatible with --advance' '
+	test_must_fail git replay --revert topic4 --advance main topic4~1..topic4 2>error &&
+	test_grep "cannot be used together" error
+'
+
+test_expect_success 'using --onto with --ref' '
+	git branch test-ref-onto topic2 &&
+	test_when_finished "git branch -D test-ref-onto" &&
+
+	git replay --ref-action=print --onto=main --ref=refs/heads/test-ref-onto topic1..topic2 >result &&
+
+	test_line_count = 1 result &&
+	test_grep "^update refs/heads/test-ref-onto " result &&
+
+	git log --format=%s $(cut -f 3 -d " " result) >actual &&
+	test_write_lines E D M L B A >expect &&
+	test_cmp expect actual
+'
+
+test_expect_success 'using --advance with --ref' '
+	git branch test-ref-advance main &&
+	git branch test-ref-target main &&
+	test_when_finished "git branch -D test-ref-advance test-ref-target" &&
+
+	git replay --ref-action=print --advance=test-ref-advance --ref=refs/heads/test-ref-target topic1..topic2 >result &&
+
+	test_line_count = 1 result &&
+	test_grep "^update refs/heads/test-ref-target " result
+'
+
+test_expect_success 'using --revert with --ref' '
+	git branch test-ref-revert topic4 &&
+	git branch test-ref-revert-target topic4 &&
+	test_when_finished "git branch -D test-ref-revert test-ref-revert-target" &&
+
+	git replay --ref-action=print --revert=test-ref-revert --ref=refs/heads/test-ref-revert-target topic4~1..topic4 >result &&
+
+	test_line_count = 1 result &&
+	test_grep "^update refs/heads/test-ref-revert-target " result
+'
+
+test_expect_success '--ref is incompatible with --contained' '
+	test_must_fail git replay --onto=main --ref=refs/heads/main --contained topic1..topic2 2>err &&
+	test_grep "cannot be used together" err
+'
+
+test_expect_success '--ref with nonexistent fully-qualified ref' '
+	test_when_finished "git update-ref -d refs/heads/new-branch" &&
+
+	git replay --onto=main --ref=refs/heads/new-branch topic1..topic2 &&
+
+	git log --format=%s -2 new-branch >actual &&
+	test_write_lines E D >expect &&
+	test_cmp expect actual
+'
+
+test_expect_success '--ref must be a valid refname' '
+	test_must_fail git replay --onto=main --ref="refs/heads/bad..ref" topic1..topic2 2>err &&
+	test_grep "is not a valid refname" err
+'
+
+test_expect_success '--ref requires fully qualified ref' '
+	test_must_fail git replay --onto=main --ref=main topic1..topic2 2>err &&
+	test_grep "is not a valid refname" err
+'
+
+test_expect_success '--onto with --ref rejects multiple revision ranges' '
+	test_must_fail git replay --onto=main --ref=refs/heads/topic2 ^topic1 topic2 topic4 2>err &&
+	test_grep "cannot be used with multiple revision ranges" err
 '
 
 test_done

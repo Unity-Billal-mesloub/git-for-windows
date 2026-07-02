@@ -740,13 +740,13 @@ static struct commit_graph *prepare_commit_graph(struct repository *r)
 	struct odb_source *source;
 
 	/*
-	 * Early return if there is no git dir or if the commit graph is
+	 * Early return if there is no object database or if the commit graph is
 	 * disabled.
 	 *
 	 * This must come before the "already attempted?" check below, because
 	 * we want to disable even an already-loaded graph file.
 	 */
-	if (!r->gitdir || r->commit_graph_disabled)
+	if (!r->objects || r->commit_graph_disabled)
 		return NULL;
 
 	if (r->objects->commit_graph_attempted)
@@ -1319,6 +1319,37 @@ static int write_graph_chunk_data(struct hashfile *f,
 	return 0;
 }
 
+/*
+ * Compute the generation offset between the commit date and its generation.
+ * This is what's ultimately stored as generation number in the commit graph.
+ *
+ * Note that the computation of the commit date is more involved than you might
+ * think. Instead of using the full commit date, we're in fact masking bits so
+ * that only the 34 lowest bits are considered. This results from the fact that
+ * commit graphs themselves only ever store 34 bits of the commit date
+ * themselves.
+ *
+ * This means that if we have a commit date that exceeds 34 bits we'll end up
+ * in situations where depending on whether the commit has been parsed from the
+ * object database or the commit graph we'll have different dates, where the
+ * ones parsed from the object database would have full 64 bit precision.
+ *
+ * But ultimately, we only ever want the offset to be relative to what we
+ * actually end up storing on disk, and hence we have to mask all the other
+ * bits.
+ */
+static timestamp_t compute_generation_offset(struct commit *c)
+{
+	timestamp_t masked_date;
+
+	if (sizeof(timestamp_t) > 4)
+		masked_date = c->date & (((timestamp_t) 1 << 34) - 1);
+	else
+		masked_date = c->date;
+
+	return commit_graph_data_at(c)->generation - masked_date;
+}
+
 static int write_graph_chunk_generation_data(struct hashfile *f,
 					     void *data)
 {
@@ -1329,7 +1360,7 @@ static int write_graph_chunk_generation_data(struct hashfile *f,
 		struct commit *c = ctx->commits.items[i];
 		timestamp_t offset;
 		repo_parse_commit(ctx->r, c);
-		offset = commit_graph_data_at(c)->generation - c->date;
+		offset = compute_generation_offset(c);
 		display_progress(ctx->progress, ++ctx->progress_cnt);
 
 		if (offset > GENERATION_NUMBER_V2_OFFSET_MAX) {
@@ -1350,7 +1381,7 @@ static int write_graph_chunk_generation_data_overflow(struct hashfile *f,
 	int i;
 	for (i = 0; i < ctx->commits.nr; i++) {
 		struct commit *c = ctx->commits.items[i];
-		timestamp_t offset = commit_graph_data_at(c)->generation - c->date;
+		timestamp_t offset = compute_generation_offset(c);
 		display_progress(ctx->progress, ++ctx->progress_cnt);
 
 		if (offset > GENERATION_NUMBER_V2_OFFSET_MAX) {
@@ -1638,7 +1669,7 @@ static void compute_reachable_generation_numbers(
 			struct commit *current = list->item;
 			struct commit_list *parent;
 			int all_parents_computed = 1;
-			uint32_t max_gen = 0;
+			timestamp_t max_gen = 0;
 
 			for (parent = current->parents; parent; parent = parent->next) {
 				repo_parse_commit(info->r, parent->item);
@@ -1741,7 +1772,7 @@ static void compute_generation_numbers(struct write_commit_graph_context *ctx)
 
 	for (i = 0; i < ctx->commits.nr; i++) {
 		struct commit *c = ctx->commits.items[i];
-		timestamp_t offset = commit_graph_data_at(c)->generation - c->date;
+		timestamp_t offset = compute_generation_offset(c);
 		if (offset > GENERATION_NUMBER_V2_OFFSET_MAX)
 			ctx->num_generation_data_overflows++;
 	}
@@ -1969,6 +2000,9 @@ static void fill_oids_from_all_packs(struct write_commit_graph_context *ctx)
 {
 	struct odb_source *source;
 	enum object_type type;
+	struct odb_for_each_object_options opts = {
+		.flags = ODB_FOR_EACH_OBJECT_PACK_ORDER,
+	};
 	struct object_info oi = {
 		.typep = &type,
 	};
@@ -1980,9 +2014,11 @@ static void fill_oids_from_all_packs(struct write_commit_graph_context *ctx)
 			ctx->approx_nr_objects);
 
 	odb_prepare_alternates(ctx->r->objects);
-	for (source = ctx->r->objects->sources; source; source = source->next)
-		packfile_store_for_each_object(source->packfiles, &oi, add_packed_commits_oi,
-					       ctx, ODB_FOR_EACH_OBJECT_PACK_ORDER);
+	for (source = ctx->r->objects->sources; source; source = source->next) {
+		struct odb_source_files *files = odb_source_files_downcast(source);
+		packfile_store_for_each_object(files->packed, &oi, add_packed_commits_oi,
+					       ctx, &opts);
+	}
 
 	if (ctx->progress_done < ctx->approx_nr_objects)
 		display_progress(ctx->progress, ctx->approx_nr_objects);
@@ -2605,7 +2641,8 @@ int write_commit_graph(struct odb_source *source,
 			replace = ctx.opts->split_flags & COMMIT_GRAPH_SPLIT_REPLACE;
 	}
 
-	ctx.approx_nr_objects = repo_approximate_object_count(r);
+	if (odb_count_objects(r->objects, ODB_COUNT_OBJECTS_APPROXIMATE, &ctx.approx_nr_objects) < 0)
+		ctx.approx_nr_objects = 0;
 
 	if (ctx.append && g) {
 		for (i = 0; i < g->num_commits; i++) {

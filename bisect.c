@@ -154,7 +154,7 @@ static void show_list(const char *debug, int counted, int nr,
 		struct commit *commit = p->item;
 		unsigned commit_flags = commit->object.flags;
 		enum object_type type;
-		unsigned long size;
+		size_t size;
 		char *buf = odb_read_object(the_repository->objects,
 					    &commit->object.oid, &type,
 					    &size);
@@ -473,8 +473,12 @@ static int register_ref(const struct reference *ref, void *cb_data UNUSED)
 
 static int read_bisect_refs(void)
 {
-	return refs_for_each_ref_in(get_main_ref_store(the_repository),
-				    "refs/bisect/", register_ref, NULL);
+	struct refs_for_each_ref_options opts = {
+		.prefix = "refs/bisect/",
+		.trim_prefix = strlen("refs/bisect/"),
+	};
+	return refs_for_each_ref_ext(get_main_ref_store(the_repository),
+				     register_ref, NULL, &opts);
 }
 
 static GIT_PATH_FUNC(git_path_bisect_names, "BISECT_NAMES")
@@ -508,7 +512,7 @@ static char *join_oid_array_hex(struct oid_array *array, char delim)
 	int i;
 
 	for (i = 0; i < array->nr; i++) {
-		strbuf_addstr(&joined_hexs, oid_to_hex(array->oid + i));
+		strbuf_add_oid_hex(&joined_hexs, array->oid + i);
 		if (i + 1 < array->nr)
 			strbuf_addch(&joined_hexs, delim);
 	}
@@ -707,7 +711,7 @@ static enum bisect_error error_if_skipped_commits(struct commit_list *tried,
 		return BISECT_OK;
 
 	printf("There are only 'skip'ped commits left to test.\n"
-	       "The first %s commit could be any of:\n", term_bad);
+	       "The first '%s' commit could be any of:\n", term_bad);
 
 	for ( ; tried; tried = tried->next)
 		printf("%s\n", oid_to_hex(&tried->item->object.oid));
@@ -806,7 +810,7 @@ static enum bisect_error handle_bad_merge_base(void)
 				"between %s and [%s].\n"),
 				bad_hex, bad_hex, good_hex);
 		} else {
-			fprintf(stderr, _("The merge base %s is %s.\n"
+			fprintf(stderr, _("The merge base %s is '%s'.\n"
 				"This means the first '%s' commit is "
 				"between %s and [%s].\n"),
 				bad_hex, term_bad, term_good, bad_hex, good_hex);
@@ -816,9 +820,9 @@ static enum bisect_error handle_bad_merge_base(void)
 		return BISECT_MERGE_BASE_CHECK;
 	}
 
-	fprintf(stderr, _("Some %s revs are not ancestors of the %s rev.\n"
+	fprintf(stderr, _("Some '%s' revs are not ancestors of the '%s' rev.\n"
 		"git bisect cannot work properly in this case.\n"
-		"Maybe you mistook %s and %s revs?\n"),
+		"Maybe you mistook '%s' and '%s' revs?\n"),
 		term_good, term_bad, term_good, term_bad);
 	return BISECT_FAILED;
 }
@@ -831,7 +835,7 @@ static void handle_skipped_merge_base(const struct object_id *mb)
 
 	warning(_("the merge base between %s and [%s] "
 		"must be skipped.\n"
-		"So we cannot be sure the first %s commit is "
+		"So we cannot be sure the first '%s' commit is "
 		"between %s and %s.\n"
 		"We continue anyway."),
 		bad_hex, good_hex, term_bad, mb_hex, bad_hex);
@@ -924,7 +928,7 @@ static enum bisect_error check_good_are_ancestors_of_bad(struct repository *r,
 	struct commit **rev;
 
 	if (!current_bad_oid)
-		return error(_("a %s revision is needed"), term_bad);
+		return error(_("a '%s' revision is needed"), term_bad);
 
 	filename = repo_git_path(the_repository, "BISECT_ANCESTORS_OK");
 
@@ -1086,7 +1090,7 @@ enum bisect_error bisect_next_all(struct repository *r, const char *prefix)
 		res = error_if_skipped_commits(tried, NULL);
 		if (res < 0)
 			goto cleanup;
-		printf(_("%s was both %s and %s\n"),
+		printf(_("%s was both '%s' and '%s'\n"),
 		       oid_to_hex(current_bad_oid),
 		       term_good,
 		       term_bad);
@@ -1109,7 +1113,7 @@ enum bisect_error bisect_next_all(struct repository *r, const char *prefix)
 		res = error_if_skipped_commits(tried, current_bad_oid);
 		if (res)
 			goto cleanup;
-		printf("%s is the first %s commit\n", oid_to_hex(bisect_rev),
+		printf("%s is the first '%s' commit\n", oid_to_hex(bisect_rev),
 			term_bad);
 
 		show_commit(revs.commits->item);
@@ -1186,13 +1190,15 @@ static int mark_for_removal(const struct reference *ref, void *cb_data)
 
 int bisect_clean_state(void)
 {
+	struct refs_for_each_ref_options opts = {
+		.prefix = "refs/bisect/",
+	};
 	int result = 0;
 
 	/* There may be some refs packed during bisection */
 	struct string_list refs_for_removal = STRING_LIST_INIT_DUP;
-	refs_for_each_fullref_in(get_main_ref_store(the_repository),
-				 "refs/bisect/", NULL, mark_for_removal,
-				 &refs_for_removal);
+	refs_for_each_ref_ext(get_main_ref_store(the_repository),
+			      mark_for_removal, &refs_for_removal, &opts);
 	string_list_append(&refs_for_removal, "BISECT_HEAD");
 	string_list_append(&refs_for_removal, "BISECT_EXPECTED_REV");
 	result = refs_delete_refs(get_main_ref_store(the_repository),

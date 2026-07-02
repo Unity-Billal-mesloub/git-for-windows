@@ -565,9 +565,13 @@ static void get_info_refs(struct strbuf *hdr, char *arg UNUSED)
 		run_service(argv, 0);
 
 	} else {
+		struct refs_for_each_ref_options opts = {
+			.namespace = get_git_namespace(),
+		};
+
 		select_getanyfile(hdr);
-		refs_for_each_namespaced_ref(get_main_ref_store(the_repository),
-					     NULL, show_text_ref, &buf);
+		refs_for_each_ref_ext(get_main_ref_store(the_repository),
+				      show_text_ref, &buf, &opts);
 		send_strbuf(hdr, "text/plain", &buf);
 	}
 	strbuf_release(&buf);
@@ -805,7 +809,7 @@ int cmd_main(int argc UNUSED, const char **argv UNUSED)
 		not_found(&hdr, "Request not supported: '%s'", dir);
 
 	setup_path();
-	if (!enter_repo(dir, 0))
+	if (!enter_repo(the_repository, dir, 0))
 		not_found(&hdr, "Not a git repository: '%s'", dir);
 	if (!getenv("GIT_HTTP_EXPORT_ALL") &&
 	    access("git-daemon-export-ok", F_OK) )

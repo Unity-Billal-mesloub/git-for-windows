@@ -34,10 +34,6 @@ struct strbuf;
 #  define DISABLE_WARNING(warning)
 #endif
 
-#ifdef DISABLE_SIGN_COMPARE_WARNINGS
-DISABLE_WARNING(-Wsign-compare)
-#endif
-
 #undef FLEX_ARRAY
 #define FLEX_ARRAY /* empty - weather balloon to require C99 FAM */
 
@@ -339,11 +335,7 @@ static inline int is_path_owned_by_current_uid(const char *path,
 #endif
 
 #ifndef find_last_dir_sep
-static inline char *git_find_last_dir_sep(const char *path)
-{
-	return strrchr(path, '/');
-}
-#define find_last_dir_sep git_find_last_dir_sep
+#define find_last_dir_sep(path) strrchr((path), '/')
 #endif
 
 #ifndef has_dir_sep
@@ -472,6 +464,21 @@ report_fn get_warn_routine(void);
 void set_die_is_recursing_routine(int (*routine)(void));
 
 /*
+ * Check that an out-parameter is "at least as const as" a matching
+ * in-parameter. For example, skip_prefix() will return "out" that is a subset
+ * of "str". So:
+ *
+ *  const str, const out: ok
+ *  non-const str, const out: ok
+ *  non-const str, non-const out: ok
+ *  const str, non-const out: compile error
+ *
+ *  See the skip_prefix macro below for an example of use.
+ */
+#define CONST_OUTPARAM(in, out) \
+	((const char **)(0 ? ((*(out) = (in)),(out)) : (out)))
+
+/*
  * If the string "str" begins with the string found in "prefix", return true.
  * The "out" parameter is set to "str + strlen(prefix)" (i.e., to the point in
  * the string right after the prefix).
@@ -487,8 +494,10 @@ void set_die_is_recursing_routine(int (*routine)(void));
  *   [skip prefix if present, otherwise use whole string]
  *   skip_prefix(name, "refs/heads/", &name);
  */
-static inline bool skip_prefix(const char *str, const char *prefix,
-			       const char **out)
+#define skip_prefix(str, prefix, out) \
+	skip_prefix_impl((str), (prefix), CONST_OUTPARAM((str), (out)))
+static inline bool skip_prefix_impl(const char *str, const char *prefix,
+				    const char **out)
 {
 	do {
 		if (!*prefix) {
@@ -605,12 +614,30 @@ static inline bool strip_suffix(const char *str, const char *suffix,
 int git_open_cloexec(const char *name, int flags);
 #define git_open(name) git_open_cloexec(name, O_RDONLY)
 
-static inline size_t st_add(size_t a, size_t b)
+
+/*
+ * Help Clang; GCC generates the same instructions for both variants on
+ * x64 and aarch64.
+ */
+#ifdef __clang__
+#define st_add_overflow __builtin_add_overflow
+#else
+static inline bool st_add_overflow(size_t a, size_t b, size_t *out)
 {
 	if (unsigned_add_overflows(a, b))
+		return true;
+	*out = a + b;
+	return false;
+}
+#endif
+
+static inline size_t st_add(size_t a, size_t b)
+{
+	size_t result;
+	if (st_add_overflow(a, b, &result))
 		die("size_t overflow: %"PRIuMAX" + %"PRIuMAX,
 		    (uintmax_t)a, (uintmax_t)b);
-	return a + b;
+	return result;
 }
 #define st_add3(a,b,c)   st_add(st_add((a),(b)),(c))
 #define st_add4(a,b,c,d) st_add(st_add3((a),(b),(c)),(d))
@@ -702,6 +729,12 @@ static inline uint64_t u64_add(uint64_t a, uint64_t b)
 #  define MAX_IO_SIZE MAX_IO_SIZE_DEFAULT
 # endif
 #endif
+
+/*
+ * Default buffer size for buffered I/O in index-pack, unpack-objects,
+ * and the hashfile layer in csum-file.
+ */
+#define DEFAULT_IO_BUFFER_SIZE (128 * 1024)
 
 #ifdef HAVE_ALLOCA_H
 # include <alloca.h>
@@ -893,8 +926,10 @@ static inline size_t xsize_t(off_t len)
  * is done via tolower(), so it is strictly ASCII (no multi-byte characters or
  * locale-specific conversions).
  */
-static inline bool skip_iprefix(const char *str, const char *prefix,
-			       const char **out)
+#define skip_iprefix(str, prefix, out) \
+	skip_iprefix_impl((str), (prefix), CONST_OUTPARAM((str), (out)))
+static inline bool skip_iprefix_impl(const char *str, const char *prefix,
+				     const char **out)
 {
 	do {
 		if (!*prefix) {
@@ -1098,4 +1133,8 @@ extern int not_supposed_to_survive;
 #define assert(expr) ((void)(not_supposed_to_survive || (expr)))
 #endif /* CHECK_ASSERTION_SIDE_EFFECTS */
 
+#endif
+
+#ifdef DISABLE_SIGN_COMPARE_WARNINGS
+DISABLE_WARNING(-Wsign-compare)
 #endif

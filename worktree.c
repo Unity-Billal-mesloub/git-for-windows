@@ -58,7 +58,7 @@ static void add_head_info(struct worktree *wt)
 
 static int is_current_worktree(struct worktree *wt)
 {
-	char *git_dir = absolute_pathdup(repo_get_git_dir(the_repository));
+	char *git_dir = absolute_pathdup(repo_get_git_dir(wt->repo));
 	char *wt_git_dir = get_worktree_git_dir(wt);
 	int is_current = !fspathcmp(git_dir, absolute_path(wt_git_dir));
 	free(wt_git_dir);
@@ -66,7 +66,7 @@ static int is_current_worktree(struct worktree *wt)
 	return is_current;
 }
 
-struct worktree *get_worktree_from_repository(struct repository *repo)
+struct worktree *get_current_worktree(struct repository *repo)
 {
 	struct worktree *wt = xcalloc(1, sizeof(*wt));
 	char *gitdir = absolute_pathdup(repo->gitdir);
@@ -78,7 +78,7 @@ struct worktree *get_worktree_from_repository(struct repository *repo)
 	wt->is_bare = !repo->worktree;
 	if (fspathcmp(gitdir, commondir))
 		wt->id = xstrdup(find_last_dir_sep(gitdir) + 1);
-	wt->is_current = is_current_worktree(wt);
+	wt->is_current = true;
 	add_head_info(wt);
 
 	free(gitdir);
@@ -227,11 +227,11 @@ struct worktree **get_worktrees_without_reading_head(void)
 char *get_worktree_git_dir(const struct worktree *wt)
 {
 	if (!wt)
-		return xstrdup(repo_get_git_dir(the_repository));
+		BUG("%s() called with NULL worktree", __func__);
 	else if (!wt->id)
-		return xstrdup(repo_get_common_dir(the_repository));
+		return xstrdup(repo_get_common_dir(wt->repo));
 	else
-		return repo_common_path(the_repository, "worktrees/%s", wt->id);
+		return repo_common_path(wt->repo, "worktrees/%s", wt->id);
 }
 
 static struct worktree *find_worktree_by_suffix(struct worktree **list,
@@ -445,7 +445,7 @@ void update_worktree_location(struct worktree *wt, const char *path_,
 	strbuf_realpath(&path, path_, 1);
 	strbuf_addf(&dotgit, "%s/.git", path.buf);
 	if (fspathcmp(wt->path, path.buf)) {
-		write_worktree_linking_files(dotgit, gitdir, use_relative_paths);
+		write_worktree_linking_files(dotgit.buf, gitdir.buf, use_relative_paths);
 
 		free(wt->path);
 		wt->path = strbuf_detach(&path, NULL);
@@ -595,7 +595,7 @@ void strbuf_worktree_ref(const struct worktree *wt,
 	strbuf_addstr(sb, refname);
 }
 
-int other_head_refs(each_ref_fn fn, void *cb_data)
+int other_head_refs(refs_for_each_cb fn, void *cb_data)
 {
 	struct worktree **worktrees, **p;
 	struct strbuf refname = STRBUF_INIT;
@@ -673,7 +673,8 @@ static void repair_gitfile(struct worktree *wt,
 		}
 	}
 
-	if (err == READ_GITFILE_ERR_NOT_A_FILE)
+	if (err == READ_GITFILE_ERR_NOT_A_FILE ||
+		err == READ_GITFILE_ERR_IS_A_DIR)
 		fn(1, wt->path, _(".git is not a file"), cb_data);
 	else if (err)
 		repair = _(".git file broken");
@@ -684,7 +685,7 @@ static void repair_gitfile(struct worktree *wt,
 
 	if (repair) {
 		fn(0, wt->path, repair, cb_data);
-		write_worktree_linking_files(dotgit, gitdir, use_relative_paths);
+		write_worktree_linking_files(dotgit.buf, gitdir.buf, use_relative_paths);
 	}
 
 done:
@@ -742,7 +743,7 @@ void repair_worktree_after_gitdir_move(struct worktree *wt, const char *old_path
 	if (!file_exists(dotgit.buf))
 		goto done;
 
-	write_worktree_linking_files(dotgit, gitdir, is_relative_path);
+	write_worktree_linking_files(dotgit.buf, gitdir.buf, is_relative_path);
 done:
 	strbuf_release(&gitdir);
 	strbuf_release(&dotgit);
@@ -853,7 +854,8 @@ void repair_worktree_at_path(const char *path,
 			strbuf_addstr(&backlink, dotgit_contents);
 			strbuf_realpath_forgiving(&backlink, backlink.buf, 0);
 		}
-	} else if (err == READ_GITFILE_ERR_NOT_A_FILE) {
+	} else if (err == READ_GITFILE_ERR_NOT_A_FILE ||
+			err == READ_GITFILE_ERR_IS_A_DIR) {
 		fn(1, dotgit.buf, _("unable to locate repository; .git is not a file"), cb_data);
 		goto done;
 	} else if (err == READ_GITFILE_ERR_NOT_A_REPO) {
@@ -913,7 +915,7 @@ void repair_worktree_at_path(const char *path,
 
 	if (repair) {
 		fn(0, gitdir.buf, repair, cb_data);
-		write_worktree_linking_files(dotgit, gitdir, use_relative_paths);
+		write_worktree_linking_files(dotgit.buf, gitdir.buf, use_relative_paths);
 	}
 done:
 	free(dotgit_contents);
@@ -1087,22 +1089,22 @@ cleanup:
 	return res;
 }
 
-void write_worktree_linking_files(struct strbuf dotgit, struct strbuf gitdir,
+void write_worktree_linking_files(const char *dotgit, const char *gitdir,
 				  int use_relative_paths)
 {
 	struct strbuf path = STRBUF_INIT;
 	struct strbuf repo = STRBUF_INIT;
 	struct strbuf tmp = STRBUF_INIT;
 
-	strbuf_addbuf(&path, &dotgit);
+	strbuf_addstr(&path, dotgit);
 	strbuf_strip_suffix(&path, "/.git");
 	strbuf_realpath(&path, path.buf, 1);
-	strbuf_addbuf(&repo, &gitdir);
+	strbuf_addstr(&repo, gitdir);
 	strbuf_strip_suffix(&repo, "/gitdir");
 	strbuf_realpath(&repo, repo.buf, 1);
 
 	if (use_relative_paths && !the_repository->repository_format_relative_worktrees) {
-		if (upgrade_repository_format(1) < 0)
+		if (upgrade_repository_format(the_repository, 1) < 0)
 			die(_("unable to upgrade repository format to support relative worktrees"));
 		if (repo_config_set_gently(the_repository, "extensions.relativeWorktrees", "true"))
 			die(_("unable to set extensions.relativeWorktrees setting"));
@@ -1110,11 +1112,11 @@ void write_worktree_linking_files(struct strbuf dotgit, struct strbuf gitdir,
 	}
 
 	if (use_relative_paths) {
-		write_file(gitdir.buf, "%s/.git", relative_path(path.buf, repo.buf, &tmp));
-		write_file(dotgit.buf, "gitdir: %s", relative_path(repo.buf, path.buf, &tmp));
+		write_file(gitdir, "%s/.git", relative_path(path.buf, repo.buf, &tmp));
+		write_file(dotgit, "gitdir: %s", relative_path(repo.buf, path.buf, &tmp));
 	} else {
-		write_file(gitdir.buf, "%s/.git", path.buf);
-		write_file(dotgit.buf, "gitdir: %s", repo.buf);
+		write_file(gitdir, "%s/.git", path.buf);
+		write_file(dotgit, "gitdir: %s", repo.buf);
 	}
 
 	strbuf_release(&path);

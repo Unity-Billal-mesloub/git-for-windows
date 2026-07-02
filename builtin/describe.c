@@ -641,6 +641,9 @@ int cmd_describe(int argc,
 		 const char *prefix,
 		 struct repository *repo UNUSED )
 {
+	struct refs_for_each_ref_options for_each_ref_opts = {
+		.flags = REFS_FOR_EACH_INCLUDE_BROKEN,
+	};
 	int contains = 0;
 	struct option options[] = {
 		OPT_BOOL(0, "contains",   &contains, N_("find the tag that comes after the commit")),
@@ -709,13 +712,25 @@ int cmd_describe(int argc,
 			     NULL);
 		if (always)
 			strvec_push(&args, "--always");
-		if (!all) {
+		if (!all)
 			strvec_push(&args, "--tags");
+
+		for_each_string_list_item(item, &patterns)
+			strvec_pushf(&args, "--refs=refs/tags/%s", item->string);
+		for_each_string_list_item(item, &exclude_patterns)
+			strvec_pushf(&args, "--exclude=refs/tags/%s", item->string);
+
+		if (all) {
 			for_each_string_list_item(item, &patterns)
-				strvec_pushf(&args, "--refs=refs/tags/%s", item->string);
+				strvec_pushf(&args, "--refs=refs/heads/%s", item->string);
 			for_each_string_list_item(item, &exclude_patterns)
-				strvec_pushf(&args, "--exclude=refs/tags/%s", item->string);
+				strvec_pushf(&args, "--exclude=refs/heads/%s", item->string);
+			for_each_string_list_item(item, &patterns)
+				strvec_pushf(&args, "--refs=refs/remotes/%s", item->string);
+			for_each_string_list_item(item, &exclude_patterns)
+				strvec_pushf(&args, "--exclude=refs/remotes/%s", item->string);
 		}
+
 		if (argc)
 			strvec_pushv(&args, argv);
 		else
@@ -737,9 +752,12 @@ int cmd_describe(int argc,
 		return ret;
 	}
 
+	if (!all)
+		for_each_ref_opts.prefix = "refs/tags/";
+
 	hashmap_init(&names, commit_name_neq, NULL, 0);
-	refs_for_each_rawref(get_main_ref_store(the_repository), get_name,
-			     NULL);
+	refs_for_each_ref_ext(get_main_ref_store(the_repository),
+			      get_name, NULL, &for_each_ref_opts);
 	if (!hashmap_get_size(&names) && !always)
 		die(_("No names found, cannot describe anything."));
 
@@ -778,7 +796,7 @@ int cmd_describe(int argc,
 			struct rev_info revs;
 			int fd;
 
-			setup_work_tree();
+			setup_work_tree(the_repository);
 			prepare_repo_settings(the_repository);
 			the_repository->settings.command_requires_full_index = 0;
 			repo_read_index(the_repository);

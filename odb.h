@@ -1,18 +1,18 @@
 #ifndef ODB_H
 #define ODB_H
 
-#include "hashmap.h"
 #include "object.h"
 #include "oidset.h"
 #include "oidmap.h"
 #include "string-list.h"
 #include "thread-utils.h"
 
-struct oidmap;
-struct oidtree;
-struct strbuf;
+struct cached_object_entry;
+struct odb_source_inmemory;
+struct packed_git;
 struct repository;
-struct multi_pack_index;
+struct strbuf;
+struct strvec;
 
 /*
  * Set this to 0 to prevent odb_read_object_info_extended() from fetching missing
@@ -31,72 +31,6 @@ extern int fetch_if_missing;
 char *compute_alternate_path(const char *path, struct strbuf *err);
 
 /*
- * The source is the part of the object database that stores the actual
- * objects. It thus encapsulates the logic to read and write the specific
- * on-disk format. An object database can have multiple sources:
- *
- *   - The primary source, which is typically located in "$GIT_DIR/objects".
- *     This is where new objects are usually written to.
- *
- *   - Alternate sources, which are configured via "objects/info/alternates" or
- *     via the GIT_ALTERNATE_OBJECT_DIRECTORIES environment variable. These
- *     alternate sources are only used to read objects.
- */
-struct odb_source {
-	struct odb_source *next;
-
-	/* Object database that owns this object source. */
-	struct object_database *odb;
-
-	/* Private state for loose objects. */
-	struct odb_source_loose *loose;
-
-	/* Should only be accessed directly by packfile.c and midx.c. */
-	struct packfile_store *packfiles;
-
-	/*
-	 * Figure out whether this is the local source of the owning
-	 * repository, which would typically be its ".git/objects" directory.
-	 * This local object directory is usually where objects would be
-	 * written to.
-	 */
-	bool local;
-
-	/*
-	 * This object store is ephemeral, so there is no need to fsync.
-	 */
-	int will_destroy;
-
-	/*
-	 * Path to the source. If this is a relative path, it is relative to
-	 * the current working directory.
-	 */
-	char *path;
-};
-
-struct packed_git;
-struct packfile_store;
-struct cached_object_entry;
-
-/*
- * A transaction may be started for an object database prior to writing new
- * objects via odb_transaction_begin(). These objects are not committed until
- * odb_transaction_commit() is invoked. Only a single transaction may be pending
- * at a time.
- *
- * Each ODB source is expected to implement its own transaction handling.
- */
-struct odb_transaction;
-typedef void (*odb_transaction_commit_fn)(struct odb_transaction *transaction);
-struct odb_transaction {
-	/* The ODB source the transaction is opened against. */
-	struct odb_source *source;
-
-	/* The ODB source specific callback invoked to commit a transaction. */
-	odb_transaction_commit_fn commit;
-};
-
-/*
  * The object database encapsulates access to objects in a repository. It
  * manages one or more sources that store the actual objects which are
  * configured via alternates.
@@ -106,7 +40,7 @@ struct object_database {
 	struct repository *repo;
 
 	/*
-	 * State of current current object database transaction. Only one
+	 * State of current object database transaction. Only one
 	 * transaction may be pending at a time. Is NULL when no transaction is
 	 * configured.
 	 */
@@ -147,16 +81,16 @@ struct object_database {
 	 * to write them into the object store (e.g. a browse-only
 	 * application).
 	 */
-	struct cached_object_entry *cached_objects;
-	size_t cached_object_nr, cached_object_alloc;
+	struct odb_source *inmemory_objects;
 
 	/*
 	 * A fast, rough count of the number of objects in the repository.
 	 * These two fields are not meant for direct access. Use
-	 * repo_approximate_object_count() instead.
+	 * odb_count_objects() instead.
 	 */
-	unsigned long approximate_object_count;
-	unsigned approximate_object_count_valid : 1;
+	unsigned long object_count;
+	unsigned object_count_flags;
+	unsigned object_count_valid : 1;
 
 	/*
 	 * Submodule source paths that will be added as additional sources to
@@ -195,19 +129,6 @@ void odb_close(struct object_database *o);
  * objects may become accessible.
  */
 void odb_reprepare(struct object_database *o);
-
-/*
- * Starts an ODB transaction. Subsequent objects are written to the transaction
- * and not committed until odb_transaction_commit() is invoked on the
- * transaction. If the ODB already has a pending transaction, NULL is returned.
- */
-struct odb_transaction *odb_transaction_begin(struct object_database *odb);
-
-/*
- * Commits an ODB transaction making the written objects visible. If the
- * specified transaction is NULL, the function is a no-op.
- */
-void odb_transaction_commit(struct odb_transaction *transaction);
 
 /*
  * Find source by its object directory path. Returns a `NULL` pointer in case
@@ -307,12 +228,12 @@ struct odb_source *odb_add_to_alternates_memory(struct object_database *odb,
 void *odb_read_object(struct object_database *odb,
 		      const struct object_id *oid,
 		      enum object_type *type,
-		      unsigned long *size);
+		      size_t *size);
 
 void *odb_read_object_peeled(struct object_database *odb,
 			     const struct object_id *oid,
 			     enum object_type required_type,
-			     unsigned long *size,
+			     size_t *size,
 			     struct object_id *oid_ret);
 
 /*
@@ -324,13 +245,13 @@ void *odb_read_object_peeled(struct object_database *odb,
  * that reference it.
  */
 int odb_pretend_object(struct object_database *odb,
-		       void *buf, unsigned long len, enum object_type type,
+		       void *buf, size_t len, enum object_type type,
 		       struct object_id *oid);
 
 struct object_info {
 	/* Request */
 	enum object_type *typep;
-	unsigned long *sizep;
+	size_t *sizep;
 	off_t *disk_sizep;
 	struct object_id *delta_base_oid;
 	void **contentp;
@@ -400,6 +321,18 @@ enum object_info_flags {
 	OBJECT_INFO_DIE_IF_CORRUPT = (1 << 3),
 
 	/*
+	 * We have already tried reading the object, but it couldn't be found
+	 * via any of the attached sources, and are now doing a second read.
+	 * This second read asks the individual sources to also evaluate
+	 * whether any on-disk state may have changed that may have caused the
+	 * object to appear.
+	 *
+	 * This flag is for internal use, only. The second read only occurs
+	 * when `OBJECT_INFO_QUICK` was not passed.
+	 */
+	OBJECT_INFO_SECOND_READ = (1 << 4),
+
+	/*
 	 * This is meant for bulk prefetching of missing blobs in a partial
 	 * clone. Implies OBJECT_INFO_SKIP_FETCH_OBJECT and OBJECT_INFO_QUICK.
 	 */
@@ -423,13 +356,13 @@ int odb_read_object_info_extended(struct object_database *odb,
  */
 int odb_read_object_info(struct object_database *odb,
 			 const struct object_id *oid,
-			 unsigned long *sizep);
+			 size_t *sizep);
 
-enum has_object_flags {
+enum odb_has_object_flags {
 	/* Retry packed storage after checking packed and loose storage */
-	HAS_OBJECT_RECHECK_PACKED = (1 << 0),
+	ODB_HAS_OBJECT_RECHECK_PACKED = (1 << 0),
 	/* Allow fetching the object in case the repository has a promisor remote. */
-	HAS_OBJECT_FETCH_PROMISOR = (1 << 1),
+	ODB_HAS_OBJECT_FETCH_PROMISOR = (1 << 1),
 };
 
 /*
@@ -438,7 +371,7 @@ enum has_object_flags {
  */
 int odb_has_object(struct object_database *odb,
 		   const struct object_id *oid,
-		   enum has_object_flags flags);
+		   enum odb_has_object_flags flags);
 
 int odb_freshen_object(struct object_database *odb,
 		       const struct object_id *oid);
@@ -512,6 +445,22 @@ typedef int (*odb_for_each_object_cb)(const struct object_id *oid,
 				      void *cb_data);
 
 /*
+ * Options that can be passed to `odb_for_each_object()` and its
+ * backend-specific implementations.
+ */
+struct odb_for_each_object_options {
+	/* A bitfield of `odb_for_each_object_flags`. */
+	enum odb_for_each_object_flags flags;
+
+	/*
+	 * If set, only iterate through objects whose first `prefix_hex_len`
+	 * hex characters matches the given prefix.
+	 */
+	const struct object_id *prefix;
+	size_t prefix_hex_len;
+};
+
+/*
  * Iterate through all objects contained in the object database. Note that
  * objects may be iterated over multiple times in case they are either stored
  * in different backends or in case they are stored in multiple sources.
@@ -525,25 +474,69 @@ typedef int (*odb_for_each_object_cb)(const struct object_id *oid,
  * Returns 0 on success, a negative error code in case a failure occurred, or
  * an arbitrary non-zero error code returned by the callback itself.
  */
+int odb_for_each_object_ext(struct object_database *odb,
+			    const struct object_info *request,
+			    odb_for_each_object_cb cb,
+			    void *cb_data,
+			    const struct odb_for_each_object_options *opts);
+
+/* Same as `odb_for_each_object_ext()` with `opts.flags` set to the given flags. */
 int odb_for_each_object(struct object_database *odb,
 			const struct object_info *request,
 			odb_for_each_object_cb cb,
 			void *cb_data,
-			unsigned flags);
+			enum odb_for_each_object_flags flags);
 
-enum {
+enum odb_count_objects_flags {
+	/*
+	 * Instead of providing an accurate count, allow the number of objects
+	 * to be approximated. Details of how this approximation works are
+	 * subject to the specific source's implementation.
+	 */
+	ODB_COUNT_OBJECTS_APPROXIMATE = (1 << 0),
+};
+
+/*
+ * Count the number of objects in the given object database. This object count
+ * may double-count objects that are stored in multiple backends, or which are
+ * stored multiple times in a single backend.
+ *
+ * Returns 0 on success, a negative error code otherwise. The number of objects
+ * will be assigned to the `out` pointer on success.
+ */
+int odb_count_objects(struct object_database *odb,
+		      enum odb_count_objects_flags flags,
+		      unsigned long *out);
+
+/*
+ * Given an object ID, find the minimum required length required to make the
+ * object ID unique across the whole object database.
+ *
+ * The `min_len` determines the minimum abbreviated length that'll be returned
+ * by this function. If `min_len < 0`, then the function will set a sensible
+ * default minimum abbreviation length.
+ *
+ * Returns 0 on success, a negative error code otherwise. The computed length
+ * will be assigned to `*out`.
+ */
+int odb_find_abbrev_len(struct object_database *odb,
+			const struct object_id *oid,
+			int min_len,
+			unsigned *out);
+
+enum odb_write_object_flags {
 	/*
 	 * By default, `odb_write_object()` does not actually write anything
 	 * into the object store, but only computes the object ID. This flag
 	 * changes that so that the object will be written as a loose object
 	 * and persisted.
 	 */
-	WRITE_OBJECT_PERSIST = (1 << 0),
+	ODB_WRITE_OBJECT_PERSIST = (1 << 0),
 
 	/*
 	 * Do not print an error in case something goes wrong.
 	 */
-	WRITE_OBJECT_SILENT = (1 << 1),
+	ODB_WRITE_OBJECT_SILENT = (1 << 1),
 };
 
 /*
@@ -559,7 +552,7 @@ int odb_write_object_ext(struct object_database *odb,
 			 enum object_type type,
 			 struct object_id *oid,
 			 struct object_id *compat_oid,
-			 unsigned flags);
+			 enum odb_write_object_flags flags);
 
 static inline int odb_write_object(struct object_database *odb,
 				   const void *buf, unsigned long len,
@@ -569,14 +562,15 @@ static inline int odb_write_object(struct object_database *odb,
 	return odb_write_object_ext(odb, buf, len, type, oid, NULL, 0);
 }
 
-struct odb_write_stream {
-	const void *(*read)(struct odb_write_stream *, unsigned long *len);
-	void *data;
-	int is_finished;
-};
+struct odb_write_stream;
 
 int odb_write_object_stream(struct object_database *odb,
 			    struct odb_write_stream *stream, size_t len,
 			    struct object_id *oid);
+
+void parse_alternates(const char *string,
+		      int sep,
+		      const char *relative_base,
+		      struct strvec *out);
 
 #endif /* ODB_H */

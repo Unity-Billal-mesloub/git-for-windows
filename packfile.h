@@ -4,6 +4,7 @@
 #include "list.h"
 #include "object.h"
 #include "odb.h"
+#include "odb/source-files.h"
 #include "oidset.h"
 #include "repository.h"
 #include "strmap.h"
@@ -27,6 +28,7 @@ struct packed_git {
 	unsigned pack_local:1,
 		 pack_keep:1,
 		 pack_keep_in_core:1,
+		 pack_keep_in_core_open:1,
 		 freshened:1,
 		 do_not_close:1,
 		 pack_promisor:1,
@@ -122,7 +124,7 @@ struct packfile_store {
 	 * that packs that contain a lot of accessed objects will be located
 	 * towards the front.
 	 *
-	 * This is usually desireable, but there are exceptions. One exception
+	 * This is usually desirable, but there are exceptions. One exception
 	 * is when the looking up multiple objects in a loop for each packfile.
 	 * In that case, we may easily end up with an infinite loop as the
 	 * packfiles get reordered to the front repeatedly.
@@ -192,7 +194,8 @@ static inline struct repo_for_each_pack_data repo_for_eack_pack_data_init(struct
 	odb_prepare_alternates(repo->objects);
 
 	for (struct odb_source *source = repo->objects->sources; source; source = source->next) {
-		struct packfile_list_entry *entry = packfile_store_get_packs(source->packfiles);
+		struct odb_source_files *files = odb_source_files_downcast(source);
+		struct packfile_list_entry *entry = packfile_store_get_packs(files->packed);
 		if (!entry)
 			continue;
 		data.source = source;
@@ -212,7 +215,8 @@ static inline void repo_for_each_pack_data_next(struct repo_for_each_pack_data *
 		return;
 
 	for (source = data->source->next; source; source = source->next) {
-		struct packfile_list_entry *entry = packfile_store_get_packs(source->packfiles);
+		struct odb_source_files *files = odb_source_files_downcast(source);
+		struct packfile_list_entry *entry = packfile_store_get_packs(files->packed);
 		if (!entry)
 			continue;
 		data->source = source;
@@ -263,7 +267,18 @@ int packfile_store_freshen_object(struct packfile_store *store,
 enum kept_pack_type {
 	KEPT_PACK_ON_DISK = (1 << 0),
 	KEPT_PACK_IN_CORE = (1 << 1),
+	KEPT_PACK_IN_CORE_OPEN = (1 << 2),
 };
+
+/*
+ * Count the number objects contained in the given packfile store. If
+ * successful, the number of objects will be written to the `out` pointer.
+ *
+ * Return 0 on success, a negative error code otherwise.
+ */
+int packfile_store_count_objects(struct packfile_store *store,
+				 enum odb_count_objects_flags flags,
+				 unsigned long *out);
 
 /*
  * Retrieve the cache of kept packs from the given packfile store. Accepts a
@@ -339,7 +354,7 @@ typedef int each_packed_object_fn(const struct object_id *oid,
 				  void *data);
 int for_each_object_in_pack(struct packed_git *p,
 			    each_packed_object_fn, void *data,
-			    unsigned flags);
+			    enum odb_for_each_object_flags flags);
 
 /*
  * Iterate through all packed objects in the given packfile store and invoke
@@ -354,19 +369,18 @@ int packfile_store_for_each_object(struct packfile_store *store,
 				   const struct object_info *request,
 				   odb_for_each_object_cb cb,
 				   void *cb_data,
-				   unsigned flags);
+				   const struct odb_for_each_object_options *opts);
+
+int packfile_store_find_abbrev_len(struct packfile_store *store,
+				   const struct object_id *oid,
+				   unsigned min_len,
+				   unsigned *out);
 
 /* A hook to report invalid files in pack directory */
 #define PACKDIR_FILE_PACK 1
 #define PACKDIR_FILE_IDX 2
 #define PACKDIR_FILE_GARBAGE 4
 extern void (*report_garbage)(unsigned seen_bits, const char *path);
-
-/*
- * Give a rough count of objects in the repository. This sacrifices accuracy
- * for speed.
- */
-unsigned long repo_approximate_object_count(struct repository *r);
 
 void pack_report(struct repository *repo);
 
@@ -441,10 +455,11 @@ off_t nth_packed_object_offset(const struct packed_git *, uint32_t n);
 off_t find_pack_entry_one(const struct object_id *oid, struct packed_git *);
 
 int is_pack_valid(struct packed_git *);
-void *unpack_entry(struct repository *r, struct packed_git *, off_t, enum object_type *, unsigned long *);
-unsigned long unpack_object_header_buffer(const unsigned char *buf, unsigned long len, enum object_type *type, unsigned long *sizep);
-unsigned long get_size_from_delta(struct packed_git *, struct pack_window **, off_t);
-int unpack_object_header(struct packed_git *, struct pack_window **, off_t *, unsigned long *);
+void *unpack_entry(struct repository *r, struct packed_git *, off_t,
+		   enum object_type *, size_t *);
+unsigned long unpack_object_header_buffer(const unsigned char *buf, unsigned long len, enum object_type *type, size_t *sizep);
+size_t get_size_from_delta(struct packed_git *, struct pack_window **, off_t);
+int unpack_object_header(struct packed_git *, struct pack_window **, off_t *, size_t *);
 off_t get_delta_base(struct packed_git *p, struct pack_window **w_curs,
 		     off_t *curpos, enum object_type type,
 		     off_t delta_obj_offset);

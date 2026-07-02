@@ -539,7 +539,7 @@ static int add_worktree(const char *path, const char *refname,
 
 	strbuf_reset(&sb);
 	strbuf_addf(&sb, "%s/gitdir", sb_repo.buf);
-	write_worktree_linking_files(sb_git, sb, opts->relative_paths);
+	write_worktree_linking_files(sb_git.buf, sb.buf, opts->relative_paths);
 	strbuf_reset(&sb);
 	strbuf_addf(&sb, "%s/commondir", sb_repo.buf);
 	write_file(sb.buf, "../..");
@@ -609,7 +609,7 @@ done:
 	 * is_junk is cleared, but do return appropriate code when hook fails.
 	 */
 	if (!ret && opts->checkout && !opts->orphan) {
-		struct run_hooks_opt opt = RUN_HOOKS_OPT_INIT;
+		struct run_hooks_opt opt = RUN_HOOKS_OPT_INIT_FORCE_SERIAL;
 
 		strvec_pushl(&opt.env, "GIT_DIR", "GIT_WORK_TREE", NULL);
 		strvec_pushl(&opt.args,
@@ -692,25 +692,8 @@ static int can_use_local_refs(const struct add_opts *opts)
 	if (refs_head_ref(get_main_ref_store(the_repository), first_valid_ref, NULL)) {
 		return 1;
 	} else if (refs_for_each_branch_ref(get_main_ref_store(the_repository), first_valid_ref, NULL)) {
-		if (!opts->quiet) {
-			struct strbuf path = STRBUF_INIT;
-			struct strbuf contents = STRBUF_INIT;
-			char *wt_gitdir = get_worktree_git_dir(NULL);
-
-			strbuf_add_real_path(&path, wt_gitdir);
-			strbuf_addstr(&path, "/HEAD");
-			strbuf_read_file(&contents, path.buf, 64);
-			strbuf_stripspace(&contents, NULL);
-			strbuf_strip_suffix(&contents, "\n");
-
-			warning(_("HEAD points to an invalid (or orphaned) reference.\n"
-				  "HEAD path: '%s'\n"
-				  "HEAD contents: '%s'"),
-				  path.buf, contents.buf);
-			strbuf_release(&path);
-			strbuf_release(&contents);
-			free(wt_gitdir);
-		}
+		if (!opts->quiet)
+			warning(_("HEAD points to an invalid (or orphaned) reference.\n"));
 		return 1;
 	}
 	return 0;

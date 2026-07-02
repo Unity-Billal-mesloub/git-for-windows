@@ -512,12 +512,7 @@ test_expect_success 'verify invalid chunk offset' '
 		"improper chunk offset(s)"
 '
 
-test_expect_success 'verify packnames out of order' '
-	corrupt_midx_and_verify $MIDX_BYTE_PACKNAME_ORDER "z" $objdir \
-		"pack names out of order"
-'
-
-test_expect_success 'verify packnames out of order' '
+test_expect_success 'verify missing pack' '
 	corrupt_midx_and_verify $MIDX_BYTE_PACKNAME_ORDER "a" $objdir \
 		"failed to load pack"
 '
@@ -576,6 +571,15 @@ test_expect_success 'verify incorrect checksum' '
 	corrupt_midx_and_verify $pos \
 		"\377\377\377\377\377\377\377\377\377\377" \
 		$objdir "incorrect checksum"
+'
+
+test_expect_success 'setup for v1-specific fsck tests' '
+	git -c midx.version=1 multi-pack-index write
+'
+
+test_expect_success 'verify packnames out of order (v1)' '
+	corrupt_midx_and_verify $MIDX_BYTE_PACKNAME_ORDER "z" $objdir \
+		"pack names out of order"
 '
 
 test_expect_success 'repack progress off for redirected stderr' '

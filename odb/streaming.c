@@ -6,11 +6,10 @@
 #include "convert.h"
 #include "environment.h"
 #include "repository.h"
-#include "object-file.h"
 #include "odb.h"
+#include "odb/source.h"
 #include "odb/streaming.h"
 #include "replace-object.h"
-#include "packfile.h"
 
 #define FILTER_BUFFER (1024*16)
 
@@ -186,11 +185,9 @@ static int istream_source(struct odb_read_stream **out,
 	struct odb_source *source;
 
 	odb_prepare_alternates(odb);
-	for (source = odb->sources; source; source = source->next) {
-		if (!packfile_store_read_object_stream(out, source->packfiles, oid) ||
-		    !odb_source_loose_read_object_stream(out, source, oid))
+	for (source = odb->sources; source; source = source->next)
+		if (!odb_source_read_object_stream(out, source, oid))
 			return 0;
-	}
 
 	return open_istream_incore(out, odb, oid);
 }
@@ -233,6 +230,16 @@ struct odb_read_stream *odb_read_stream_open(struct object_database *odb,
 	}
 
 	return st;
+}
+
+ssize_t odb_write_stream_read(struct odb_write_stream *st, void *buf, size_t sz)
+{
+	return st->read(st, buf, sz);
+}
+
+void odb_write_stream_release(struct odb_write_stream *st)
+{
+	free(st->data);
 }
 
 int odb_stream_blob_to_fd(struct object_database *odb,
@@ -289,4 +296,45 @@ int odb_stream_blob_to_fd(struct object_database *odb,
  close_and_exit:
 	odb_read_stream_close(st);
 	return result;
+}
+
+struct read_object_fd_data {
+	int fd;
+	size_t remaining;
+};
+
+static ssize_t read_object_fd(struct odb_write_stream *stream,
+			      unsigned char *buf, size_t len)
+{
+	struct read_object_fd_data *data = stream->data;
+	ssize_t read_result;
+	size_t count;
+
+	if (stream->is_finished)
+		return 0;
+
+	count = data->remaining < len ? data->remaining : len;
+	read_result = read_in_full(data->fd, buf, count);
+	if (read_result < 0 || (size_t)read_result != count)
+		return -1;
+
+	data->remaining -= count;
+	if (!data->remaining)
+		stream->is_finished = 1;
+
+	return read_result;
+}
+
+void odb_write_stream_from_fd(struct odb_write_stream *stream, int fd,
+			      size_t size)
+{
+	struct read_object_fd_data *data;
+
+	CALLOC_ARRAY(data, 1);
+	data->fd = fd;
+	data->remaining = size;
+
+	stream->data = data;
+	stream->read = read_object_fd;
+	stream->is_finished = 0;
 }

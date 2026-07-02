@@ -37,7 +37,7 @@ static void show_one(const struct show_one_options *opts,
 	struct object_id peeled;
 
 	if (!odb_has_object(the_repository->objects, ref->oid,
-			    HAS_OBJECT_RECHECK_PACKED | HAS_OBJECT_FETCH_PROMISOR))
+			    ODB_HAS_OBJECT_RECHECK_PACKED | ODB_HAS_OBJECT_FETCH_PROMISOR))
 		die("git show-ref: bad ref %s (%s)", ref->name,
 		    oid_to_hex(ref->oid));
 
@@ -215,14 +215,19 @@ static int cmd_show_ref__patterns(const struct patterns_options *opts,
 		refs_head_ref(get_main_ref_store(the_repository), show_ref,
 			      &show_ref_data);
 	if (opts->branches_only || opts->tags_only) {
-		if (opts->branches_only)
-			refs_for_each_fullref_in(get_main_ref_store(the_repository),
-						 "refs/heads/", NULL,
-						 show_ref, &show_ref_data);
-		if (opts->tags_only)
-			refs_for_each_fullref_in(get_main_ref_store(the_repository),
-						 "refs/tags/", NULL, show_ref,
-						 &show_ref_data);
+		struct refs_for_each_ref_options for_each_ref_opts = { 0 };
+
+		if (opts->branches_only) {
+			for_each_ref_opts.prefix = "refs/heads/";
+			refs_for_each_ref_ext(get_main_ref_store(the_repository),
+					      show_ref, &show_ref_data, &for_each_ref_opts);
+		}
+
+		if (opts->tags_only) {
+			for_each_ref_opts.prefix = "refs/tags/";
+			refs_for_each_ref_ext(get_main_ref_store(the_repository),
+					      show_ref, &show_ref_data, &for_each_ref_opts);
+		}
 	} else {
 		refs_for_each_ref(get_main_ref_store(the_repository),
 				  show_ref, &show_ref_data);

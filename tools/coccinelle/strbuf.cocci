@@ -60,3 +60,27 @@ expression E1, E2;
 @@
 - strbuf_addstr(E1, real_path(E2));
 + strbuf_add_real_path(E1, E2);
+
+@@
+identifier fn, param;
+@@
+  fn(...,
+- struct strbuf param
++ struct strbuf *param
+  ,...)
+  {
+  ...
+  }
+
+// In modern codebase, .buf member of an empty strbuf is not NULL.
+@@
+struct strbuf SB;
+@@
+- SB.buf ? SB.buf : ""
++ SB.buf
+
+@@
+expression SB, OID;
+@@
+- strbuf_addstr(SB, oid_to_hex(OID))
++ strbuf_add_oid_hex(SB, OID)
